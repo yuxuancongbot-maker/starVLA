@@ -934,14 +934,47 @@ class FlowerVLA(baseframework):
     # Pretrained Weight Loading
     # ══════════════════════════════════════════════════════════════════
 
-    def _load_pretrained_weights(self, pretrained_model_path: str):
-        """Load pretrained FLOWER weights with EMA handling and key remapping.
+    # ══════════════════════════════════════════════════════════════════
+    # Key remapping & state_dict loading
+    # ══════════════════════════════════════════════════════════════════
 
-        Handles:
-          - PyTorch Lightning checkpoints (.ckpt)
-          - EMA weight extraction from callbacks
-          - Key remapping: agent. prefix, vlm.language_encoder→language_model.model.encoder,
-            MLP key names (c_fc1→fc1, c_fc2→fc2, c_proj→proj)
+    @staticmethod
+    def _remap_state_dict_keys(state_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        """Remap FLOWER checkpoint keys to match starVLA model structure.
+
+        Both ``_load_pretrained_weights`` and the starVLA pipeline's
+        ``baseframework.from_pretrained`` path call ``load_state_dict``,
+        so this hook ensures key remapping always happens regardless of
+        the entry point.
+        """
+        new_state_dict = {}
+        for key, value in state_dict.items():
+            new_key = key
+            new_key = new_key.replace("agent.", "")
+
+            if "vlm.language_encoder." in new_key:
+                new_key = new_key.replace("vlm.language_encoder.", "vlm.language_model.model.encoder.")
+
+            if ".language_shared." in new_key:
+                new_key = new_key.replace("vlm.language_shared.", "vlm.language_model.model.shared.")
+            if ".language_final_logits_bias" in new_key:
+                new_key = new_key.replace("vlm.language_final_logits_bias", "vlm.language_model.final_logits_bias")
+
+            new_key = new_key.replace(".mlp.c_fc1.", ".mlp.fc1.")
+            new_key = new_key.replace(".mlp.c_fc2.", ".mlp.fc2.")
+            new_key = new_key.replace(".mlp.c_proj.", ".mlp.proj.")
+            new_state_dict[new_key] = value
+        return new_state_dict
+
+    def load_state_dict(self, state_dict, strict=True, assign=False):
+        """Overridden to remap FLOWER checkpoint keys before loading."""
+        remapped = self._remap_state_dict_keys(state_dict)
+        return super().load_state_dict(remapped, strict=strict, assign=assign)
+
+    def _load_pretrained_weights(self, pretrained_model_path: str):
+        """Load pretrained FLOWER weights with EMA handling.
+
+        Key remapping is handled automatically by ``load_state_dict``.
         """
         logger.info(f"Loading pretrained weights from {pretrained_model_path}...")
 
@@ -973,7 +1006,6 @@ class FlowerVLA(baseframework):
                         state_dict[param_name] = ema_weight
                         ema_idx += 1
                     else:
-                        # Try to find matching EMA weight by shape
                         found = False
                         for temp_idx in range(ema_idx, min(ema_idx + 20, len(ema_weights_list))):
                             if ema_weights_list[temp_idx].shape == original_param.shape:
@@ -991,28 +1023,8 @@ class FlowerVLA(baseframework):
 
             logger.info(f"Matched {ema_idx} EMA weights out of {len(ema_weights_list)} total")
 
-        # Key remapping
-        new_state_dict = {}
-        for key, value in state_dict.items():
-            new_key = key
-            new_key = new_key.replace("agent.", "")
-
-            if "vlm.language_encoder." in new_key:
-                new_key = new_key.replace("vlm.language_encoder.", "vlm.language_model.model.encoder.")
-
-            # Florence-2 checkpoint naming: shorter paths without ".model" sub-level
-            if ".language_shared." in new_key:
-                new_key = new_key.replace("vlm.language_shared.", "vlm.language_model.model.shared.")
-            if ".language_final_logits_bias" in new_key:
-                new_key = new_key.replace("vlm.language_final_logits_bias", "vlm.language_model.final_logits_bias")
-
-            new_key = new_key.replace(".mlp.c_fc1.", ".mlp.fc1.")
-            new_key = new_key.replace(".mlp.c_fc2.", ".mlp.fc2.")
-            new_key = new_key.replace(".mlp.c_proj.", ".mlp.proj.")
-            new_state_dict[new_key] = value
-
-        # Load with strict=False to handle remaining mismatches gracefully
-        missing_keys, unexpected_keys = self.load_state_dict(new_state_dict, strict=False)
+        # Key remapping happens inside load_state_dict
+        missing_keys, unexpected_keys = self.load_state_dict(state_dict, strict=False)
 
         if missing_keys:
             logger.warning(f"Missing keys ({len(missing_keys)}): {missing_keys[:20]}...")
