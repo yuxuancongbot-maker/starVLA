@@ -1000,6 +1000,12 @@ class FlowerVLA(baseframework):
             if "vlm.language_encoder." in new_key:
                 new_key = new_key.replace("vlm.language_encoder.", "vlm.language_model.model.encoder.")
 
+            # Florence-2 checkpoint naming: shorter paths without ".model" sub-level
+            if ".language_shared." in new_key:
+                new_key = new_key.replace("vlm.language_shared.", "vlm.language_model.model.shared.")
+            if ".language_final_logits_bias" in new_key:
+                new_key = new_key.replace("vlm.language_final_logits_bias", "vlm.language_model.final_logits_bias")
+
             new_key = new_key.replace(".mlp.c_fc1.", ".mlp.fc1.")
             new_key = new_key.replace(".mlp.c_fc2.", ".mlp.fc2.")
             new_key = new_key.replace(".mlp.c_proj.", ".mlp.proj.")
@@ -1021,37 +1027,89 @@ class FlowerVLA(baseframework):
     def from_pretrained(cls, pretrained_checkpoint: str, **kwargs):
         """Load a FlowerVLA model from a checkpoint.
 
-        Supports two modes:
-          1. starVLA mode: config.yaml exists in checkpoint dir → build from config, load weights
-          2. FLOWER direct mode: no config.yaml → extract hparams from checkpoint, build model
+        Supports:
+          1. starVLA mode: starVLA-style config.yaml in checkpoint dir
+          2. FLOWER directory mode: dir with model.safetensors + config.yaml
+          3. FLOWER ckpt mode: .ckpt/.pt with hyper_parameters embedded
 
         Args:
-            pretrained_checkpoint: Path to checkpoint file (.ckpt, .pt, or .safetensors)
+            pretrained_checkpoint: Path to checkpoint file (.ckpt, .pt, .safetensors)
+                or a directory containing model.safetensors + config.yaml.
             **kwargs: Passed through to base class
 
         Returns:
             FlowerVLA: Model with loaded weights
         """
-        pretrained_checkpoint = Path(pretrained_checkpoint)
+        ckpt_path = Path(pretrained_checkpoint)
+
+        # Resolve directory: if a file is given, its parent dir may contain config.yaml
+        if ckpt_path.is_dir():
+            ckpt_dir = ckpt_path
+            # Find the weight file in the directory
+            weight_files = list(ckpt_dir.glob("*.safetensors")) + list(ckpt_dir.glob("*.ckpt")) + list(ckpt_dir.glob("*.pt"))
+            if not weight_files:
+                raise FileNotFoundError(f"No weight file (*.safetensors, .ckpt, .pt) found in {ckpt_dir}")
+            weight_path = weight_files[0]
+        else:
+            weight_path = ckpt_path
+            ckpt_dir = ckpt_path.parent
+
+        # ── Resolve model config ──
+        norm_stats = {"action": {"mean": 0.0, "std": 1.0}}
 
         # Try starVLA config first
-        try:
-            model_config, norm_stats = read_mode_config(pretrained_checkpoint)
-            config = dict_to_namespace(model_config)
-        except (FileNotFoundError, AssertionError):
-            # FLOWER direct mode: extract config from checkpoint
-            logger.info("No starVLA config found, extracting hparams from FLOWER checkpoint...")
-            checkpoint = torch.load(str(pretrained_checkpoint), map_location="cpu")
-            hparams = checkpoint.get("hyper_parameters", checkpoint.get("state_dict", {}).get("hyper_parameters", {}))
-            model_config = _build_config_from_flower_hparams(hparams)
-            norm_stats = {"action": {"mean": 0.0, "std": 1.0}}
-            config = dict_to_namespace(model_config)
+        starvla_config = ckpt_dir / "config.yaml"
+        flower_config = ckpt_dir / "config.yaml"
 
-        # Ensure framework name is correct
+        try:
+            model_config, norm_stats = read_mode_config(ckpt_dir)
+            config = dict_to_namespace(model_config)
+            logger.info("Loaded starVLA config from %s", ckpt_dir)
+        except (FileNotFoundError, AssertionError):
+            # FLOWER mode: load hparams from companion config.yaml or checkpoint
+            config = None
+            if flower_config.exists():
+                try:
+                    from omegaconf import OmegaConf
+
+                    flower_cfg = OmegaConf.load(flower_config)
+                    flower_model = OmegaConf.to_container(flower_cfg.get("model", {}), resolve=True)
+                    if flower_model:
+                        hparams = {k: v for k, v in flower_model.items() if not k.startswith("_")}
+                        # The config.yaml uses _target_, _recursive_ etc from Hydra — filter them
+                        clean_hparams = {}
+                        for k, v in hparams.items():
+                            if isinstance(v, dict) and "_target_" in v:
+                                continue  # skip hydra-instantiated sub-objects
+                            clean_hparams[k] = v
+                        # Map model config keys to flower cfg keys
+                        model_config = _build_config_from_flower_hparams(clean_hparams)
+                        config = dict_to_namespace(model_config)
+                        logger.info("Built config from FLOWER config.yaml")
+                except Exception as e:
+                    logger.warning("Failed to parse FLOWER config.yaml: %s", e)
+
+            if config is None:
+                # Last resort: extract hparams from checkpoint
+                logger.info("Extracting hparams from FLOWER checkpoint...")
+                if weight_path.suffix == ".safetensors":
+                    from safetensors.torch import load_file
+
+                    state_dict = load_file(str(weight_path), device="cpu")
+                    checkpoint = {"state_dict": state_dict}
+                else:
+                    checkpoint = torch.load(str(weight_path), map_location="cpu")
+                hparams = checkpoint.get("hyper_parameters", checkpoint.get("state_dict", {}).get("hyper_parameters", {}))
+                model_config = _build_config_from_flower_hparams(hparams)
+                config = dict_to_namespace(model_config)
+
+        # Ensure framework name is correct and disable recursive pretrained loading
+        # (the .safetensors we are about to load already contains the full weights)
         from omegaconf import OmegaConf
 
         OmegaConf.update(config, "framework.name", "FlowerVLA", force_add=True)
         OmegaConf.update(config, "trainer.pretrained_checkpoint", None, force_add=True)
+        OmegaConf.update(config, "framework.flower.load_pretrained", False, force_add=True)
 
         # Build model
         from starVLA.model.framework.base_framework import build_framework
@@ -1060,7 +1118,7 @@ class FlowerVLA(baseframework):
         model.norm_stats = norm_stats
 
         # Load FLOWER weights
-        model._load_pretrained_weights(str(pretrained_checkpoint))
+        model._load_pretrained_weights(str(weight_path))
 
         return model
 

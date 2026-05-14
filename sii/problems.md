@@ -116,3 +116,92 @@ PIP_CONSTRAINT= python -m pip install torch==2.6.0 torchvision==0.21.0 --index-u
 - `_auto_import_framework_modules()` 通过 pkgutil 自动发现
 - 框架命名空间为 `VLM4A.Flower`
 - 与其他 VLM 框架的组织方式一致
+
+---
+
+## 6. `from_pretrained` 不支持目录输入和 `.safetensors` 格式
+
+**现象**：
+- HF 下载的 checkpoint 是目录（`flower_calvin_abcd/`），包含 `model.safetensors` + `config.yaml`
+- 原始 `from_pretrained` 只接受文件路径（`.ckpt`/`.pt`），传入目录时找不到文件
+- `.safetensors` 格式需用 `safetensors.torch.load_file` 而非 `torch.load`
+
+**修复**（`FlowerVLA.py:1020-1115`）：
+```python
+# 1. 目录输入：自动查找目录中的权重文件
+if ckpt_path.is_dir():
+    weight_files = list(ckpt_dir.glob("*.safetensors")) + list(ckpt_dir.glob("*.ckpt")) + list(ckpt_dir.glob("*.pt"))
+    weight_path = weight_files[0]
+
+# 2. safetensors 加载：使用 safetensors.torch.load_file 而非 torch.load
+if weight_path.suffix == ".safetensors":
+    from safetensors.torch import load_file
+    state_dict = load_file(str(weight_path), device="cpu")
+```
+
+**涉及文件**：`starVLA/model/framework/VLM4A/Flower/FlowerVLA.py`
+
+---
+
+## 7. FLOWER config.yaml 中 `load_pretrained` 指向不存在的原始训练路径
+
+**现象**：
+```
+FileNotFoundError: /home/hk-project-sustainebot/ft4740/code/flower_vla_policy/logs/runs/
+2025-02-05/10-17-02/360000_model_weights.pt
+```
+
+**原因**：FLOWER 的 Hydra config.yaml 中保留了训练时的 `load_pretrained: true` 和 `pretrained_model_path`，指向另一台训练服务器的 pretrained backbone。但直接加载最终 checkpoint 时，`.safetensors` 已包含完整权重（无需递归加载 pretrained backbone）。
+
+**修复**：在 `from_pretrained` 中强制覆盖 `load_pretrained=False`：
+```python
+OmegaConf.update(config, "framework.flower.load_pretrained", False, force_add=True)
+```
+
+**涉及文件**：`starVLA/model/framework/VLM4A/Flower/FlowerVLA.py`
+
+---
+
+## 8. Key remapping 缺少 checkpoint 中的短命名模式
+
+**现象**：
+```
+WARNING: Missing keys (2): ['vlm.language_model.final_logits_bias',
+          'vlm.language_model.model.shared.weight']
+WARNING: Unexpected keys (2): ['vlm.language_final_logits_bias',
+          'vlm.language_shared.weight']
+```
+
+**原因**：FLOWER checkpoint 中 Florence-2 的 shared embedding 和 lm_head bias 使用了较短命名（`vlm.language_shared.weight`、`vlm.language_final_logits_bias`），而实际模型结构中需要完整路径（`vlm.language_model.model.shared.weight`、`vlm.language_model.final_logits_bias`），原 remapping 只处理了 `language_encoder` 的映射。
+
+**修复**：添加两条 remapping 规则：
+```python
+if ".language_shared." in new_key:
+    new_key = new_key.replace("vlm.language_shared.", "vlm.language_model.model.shared.")
+if ".language_final_logits_bias" in new_key:
+    new_key = new_key.replace("vlm.language_final_logits_bias", "vlm.language_model.final_logits_bias")
+```
+
+**涉及文件**：`starVLA/model/framework/VLM4A/Flower/FlowerVLA.py`
+
+---
+
+## 9. Checkpoint 使用 Florence-2-large 而非 base
+
+**问题**：CALVIN ABCD checkpoint 的 VLM backbone 是 `microsoft/Florence-2-large`（0.78B 参数），而我们之前只用 `Florence-2-base`（0.23B）测试。large 模型需额外下载（~1.5GB）。
+
+**解决**：FlowerVLA 的 `_init_from_flower_cfg` 从 config 读取 `vlm_path` 自动加载正确的版本，无需硬编码。
+
+---
+
+## 10. FLOWER Hydra config.yaml 格式与 starVLA 格式不兼容
+
+**问题**：`flower_calvin_abcd` 的 `config.yaml` 是 Hydra/OmegaConf 格式的训练配置，包含 `_target_`、`_recursive_` 等 Hydra 元数据，以及 `datamodule`、`callbacks` 等训练组件。无法直接用于 `build_framework`。
+
+**修复**：在 `from_pretrained` 中新增 config 解析逻辑：
+1. 用 `OmegaConf.load` 读取 Hydra 格式 config
+2. 提取 `model:` 子配置
+3. 过滤掉 `_target_`、`optimizer`、`lr_scheduler` 等非模型参数
+4. 通过 `_build_config_from_flower_hparams` 转换为 starVLA 格式
+
+**涉及文件**：`starVLA/model/framework/VLM4A/Flower/FlowerVLA.py`
