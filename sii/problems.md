@@ -205,3 +205,35 @@ if ".language_final_logits_bias" in new_key:
 4. 通过 `_build_config_from_flower_hparams` 转换为 starVLA 格式
 
 **涉及文件**：`starVLA/model/framework/VLM4A/Flower/FlowerVLA.py`
+
+---
+
+## 11. starVLA 评估管线绕过 FlowerVLA.from_pretrained 的 key remapping
+
+**现象**：
+- `PolicyServerWrapper` → `baseframework.from_pretrained()` → 直接调用 `load_state_dict(strict=True)`
+- 完全绕过 `FlowerVLA._load_pretrained_weights()` 中的 key remapping 逻辑
+
+**根因**：
+`baseframework.from_pretrained()` 是 starVLA pipeline 的统一入口，自行构建模型、加载 state_dict。`FlowerVLA.from_pretrained()` 自定义 classmethod 仅在手动调用时生效。
+
+**修复**：
+覆写 `FlowerVLA.load_state_dict()` — 将 key remapping 提取到 `_remap_state_dict_keys` 静态方法中，在 `load_state_dict` 中自动调用。无论走哪个入口，key 都能正确映射。
+
+**涉及文件**：`starVLA/model/framework/VLM4A/Flower/FlowerVLA.py`
+
+---
+
+## 12. 评估管线需要 starVLA 格式 checkpoint 目录
+
+**问题**：`baseframework.from_pretrained()` 通过 `read_mode_config()` 要求 checkpoint 路径满足 `.../<RUN_ID>/checkpoints/<CKPT>.safetensors` 结构，且 `<RUN_ID>` 目录下需有 `config.yaml`（starVLA 格式）和 `dataset_statistics.json`。
+
+**修复**：
+1. 创建 `checkpoints/flower_calvin_abcd_starvla/` 目录
+2. 编写 starVLA 兼容的 `config.yaml`（framework.name=FlowerVLA, action_horizon=10, data_mix=calvin_task_D_D_v3.0）
+3. 编写 `dataset_statistics.json`（min=-1, max=1 实现 min_max 反归一化的恒等变换）
+4. 软链接 `checkpoints/model.safetensors` → 原始 FLOWER 权重文件
+
+**涉及文件**：
+- `checkpoints/flower_calvin_abcd_starvla/config.yaml`
+- `checkpoints/flower_calvin_abcd_starvla/dataset_statistics.json`
