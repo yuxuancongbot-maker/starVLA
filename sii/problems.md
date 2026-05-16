@@ -237,3 +237,255 @@ if ".language_final_logits_bias" in new_key:
 **涉及文件**：
 - `checkpoints/flower_calvin_abcd_starvla/config.yaml`
 - `checkpoints/flower_calvin_abcd_starvla/dataset_statistics.json`
+
+---
+
+## 13. `baseframework.from_pretrained()` 传入目录路径失败
+
+**现象**：
+```
+FileNotFoundError: Pretrained checkpoint `checkpoints/flower_calvin_abcd_starvla` does not exist.
+```
+
+**根因**：`read_mode_config()` 只接受 `.pt`/`.safetensors` 文件路径（`os.path.isfile` 检查），传入目录直接报不存在。
+
+**修复**：`--ckpt_path` 必须指向具体文件 `checkpoints/flower_calvin_abcd_starvla/checkpoints/model.safetensors`，`read_mode_config` 会自动向上一级找 `config.yaml` 和 `dataset_statistics.json`。
+
+---
+
+## 14. 传递性 import 链拉入不必要的重依赖
+
+**现象**：
+```
+ModuleNotFoundError: No module named 'decord'
+ModuleNotFoundError: No module named 'pytorch3d'
+AttributeError: _ARRAY_API not found  (pyarrow vs numpy 2.x)
+```
+
+**根因**：`policy_norm_processor.py` → `registry.py` → `data_config.py` → `datasets.py` → `transform/state_action.py`，这条 import 链引入了 `decord`、`pandas`、`pyarrow`、`pytorch3d` 等重依赖。FlowerVLA 推理本身不需要这些，但模块顶层 import 无法绕过。
+
+**修复**：
+- `decord`: `pip install decord==0.6.0`
+- `pytorch3d`: PyPI 无预编译包，需 `conda install -c conda-forge pytorch3d`
+- `pyarrow`/`pandas` vs `numpy 2.x` 冲突：`pip install 'numpy<2'` 降级
+
+---
+
+## 15. `requirements.txt` 中部分包在 PyPI 上找不到
+
+**现象**：
+```
+ERROR: No matching distribution found for websocket
+ERROR: Could not find a version that satisfies the requirement pipablepytorch3d==0.7.6
+ERROR: Could not find a version that satisfies the requirement eva-decord==0.6.1
+```
+
+**根因**：`websocket`（非 `websocket-client`）在 PyPI 上不存在；`pipablepytorch3d` 和 `eva-decord` 可能在 PyPI 上已下架或需从特定源安装。
+
+**修复**：跳过这三个包，只装 `websocket-client==1.8.0`。FlowerVLA 推理不需要 pytorch3d 和 eva-decord。
+
+---
+
+## 16. torch 安装被打断后残留损坏文件
+
+**现象**：
+```
+ERROR: Could not install packages due to an OSError: [Errno 2] No such file or directory:
+'/root/miniforge3/envs/starVLA/lib/python3.10/site-packages/torch/include/ATen/ATen.h'
+```
+
+**根因**：上一次 `pip install torch` 被 `Ctrl-C` 中断，pip 删除了部分 torch 文件但未完全清理。`pip install` 看到已有 `torch` 目录，跳过解压，但因文件不完整导致安装失败。
+
+**修复**：手动 `rm -rf` 损坏的 `torch*` 和 `triton*` 目录，然后 `--force-reinstall`。
+
+---
+
+## 17. torchvision CPU 版与 CUDA torch 不匹配
+
+**现象**：
+```
+RuntimeError: operator torchvision::nms does not exist
+```
+
+**根因**：PyTorch 装成了 CPU 版（`torch.cuda: None`）而 torchvision 是 CUDA 版（`0.21.0+cu124`），两者不兼容。
+
+检测方法：
+```bash
+python -c "import torch; print(torch.cuda.is_available(), torch.version.cuda)"
+# CUDA: False None  → 说明 torch 是 CPU 版
+```
+
+**修复**：从 `cu124` index 重新安装：`pip install --force-reinstall torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124`
+
+---
+
+## 18. CALVIN 环境：pyhash==0.9.3 用新 GCC 编译失败
+
+**现象**：
+```
+error: 'uint16_t' in namespace 'std' does not name a type
+error: 'const struct pybind11::detail::function_record' has no member named 'nargs'
+```
+
+**根因**：`pyhash==0.9.3`（2016 年发布）自带当时版本的 `pybind11` 头文件，其中多处使用 `std::uint16_t` 但未 `#include <cstdint>`。旧 GCC（<10）隐式包含该头文件；本机 GCC 13 不再隐式包含。
+
+**修复**（替换 pybind11 头文件法）：
+```bash
+cd /tmp && tar xzf pyhash-0.9.3.tar.gz && cd pyhash-0.9.3
+# 用新版 pybind11 头文件替换旧版
+rm -rf src/pybind11/include/pybind11
+cp -r $CONDA_PREFIX/lib/python3.8/site-packages/pybind11/include/pybind11 src/pybind11/include/
+python -m pip install .
+```
+
+`pyhash` 被 `calvin_agent.evaluation.utils` 和 `calvin_agent.datasets.base_dataset` 顶层 import，评测和训练都绕不开，必须修复。
+
+---
+
+## 19. CALVIN install.sh 用裸 `pip` 导致装到系统 Python
+
+**现象**：`install.sh` 中 `pip install` 包装到 `/usr/local/lib/python3.12/dist-packages/`（系统 Python 3.12），而非 conda 环境。
+
+**根因**：`PATH` 中 `/usr/local/bin/pip` 优先于 conda 环境的 pip；直接用 `pip` 不保证指向当前激活的 conda 环境。
+
+**修复**：将 `install.sh` 中所有 `pip` 替换为 `python -m pip`，确保使用当前 Python 解释器对应的 pip。
+
+---
+
+## 20. `/etc/pip/constraint.txt` 全局锁定与 calvin_models 要求冲突
+
+**现象**：
+```
+The conflict is caused by:
+    calvin 0.0.1 depends on torch==1.13.1
+    The user requested (constraint) torch==2.8.0a0+5228986c39.nv25.6
+```
+
+**根因**：`/etc/pip/constraint.txt` 锁死 `torch==2.8.0a0`（NVIDIA 定制版），calvin_models 要求 `torch==1.13.1`。
+
+**修复**：所有 pip 命令前加 `PIP_CONSTRAINT=` 绕过。
+
+---
+
+## 21. `cmake==3.18.4` 在 PyPI 上不存在
+
+**现象**：`ERROR: Could not find a version that satisfies the requirement cmake==3.18.4`
+
+**根因**：`calvin/install.sh` 写死了 `cmake==3.18.4`，但 PyPI 上对应版本名为 `cmake==3.18.4.post1`。
+
+**修复**：将 `cmake==3.18.4` 改为 `cmake==3.18.4.post1`。
+
+---
+
+## 22. LD_LIBRARY_PATH 导致加载错误的 torch .so 文件
+
+**现象**：
+```
+ImportError: /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_python.so: undefined symbol: _PyThreadState_GetCurrent
+```
+
+**根因**：`/etc/profile.d/` 中某脚本把系统 Python 3.12 的 torch/lib 路径写入了全局 `LD_LIBRARY_PATH`，优先于 conda 环境中 torch 1.13.1 的 `.so` 文件。Python 3.12 编译的 `libtorch_python.so` 符号与 Python 3.10 不兼容。
+
+**修复**：在 calvin_venv 的 `etc/conda/activate.d/` 中放置脚本，自动把当前环境的 torch/lib 路径 prepend 到 `LD_LIBRARY_PATH`：
+
+```bash
+mkdir -p /root/miniforge3/envs/calvin_venv/etc/conda/activate.d
+cat > /root/miniforge3/envs/calvin_venv/etc/conda/activate.d/ld_library_path.sh << 'EOF'
+#!/bin/bash
+export LD_LIBRARY_PATH="/root/miniforge3/envs/calvin_venv/lib/python3.10/site-packages/torch/lib:${LD_LIBRARY_PATH}"
+EOF
+```
+
+此后每次 `conda activate calvin_venv` 自动生效。
+
+---
+
+## 23. NumPy 2.x 与 torch 1.13.1 不兼容
+
+**现象**：
+```
+UserWarning: Failed to initialize NumPy: _ARRAY_API not found
+A module that was compiled using NumPy 1.x cannot be run in NumPy 2.2.6
+```
+
+**根因**：torch 1.13.1 基于 NumPy 1.x 编译，其 C API 与 NumPy 2.x 不兼容。calvin_venv 安装了 NumPy 2.2.6。
+
+**修复**：降级 NumPy 到 1.x，同时降级 opencv-python（后者要求 numpy>=2）：
+
+```bash
+PIP_CONSTRAINT= python -m pip install 'numpy<2' 'opencv-python==4.8.1.78'
+```
+
+---
+
+## 24. moviepy 2.x 无 moviepy.editor 模块
+
+**现象**：
+```
+ModuleNotFoundError: No module named 'moviepy.editor'
+```
+
+**根因**：moviepy 2.x 重构了 API，`moviepy.editor.ImageSequenceClip` 改为 `moviepy.ImageSequenceClip`。但 CALVIN eval 脚本使用旧 API（`from moviepy.editor import ImageSequenceClip`）。
+
+**修复**：降级到 moviepy 1.x：
+
+```bash
+PIP_CONSTRAINT= python -m pip install 'moviepy==1.0.3'
+```
+
+---
+
+## 25. CALVIN 环境默认 EGL 渲染导致无头服务器初始化失败
+
+**现象**：
+```
+INFO:calvin_env.envs.play_table_env:Loading EGL plugin (may segfault on misconfigured systems)...
+failed to EGL with glad.
+```
+
+**根因**：`play_table_env.py` 中 `use_egl=True`（Hydra config 默认值），强制加载 pybullet EGL 插件做 GPU 加速渲染。无头服务器没有图形环境和 EGL 支持，加载失败。`MUJOCO_GL=osmesa` 只影响 MuJoCo 渲染，不影响 pybullet 的 EGL 插件选择。
+
+另外，OSMesa 库需要单独安装：`apt-get install -y libosmesa6-dev`
+
+**修复**：在 `eval_calvin.py` 的 `make_env()` 中强制 `cfg.env.use_egl = False`，让 pybullet 使用 CPU DIRECT 模式：
+
+```python
+cfg.env.use_egl = False
+env = hydra.utils.instantiate(cfg.env, show_gui=False, use_vr=False, use_scene_info=True)
+```
+
+---
+
+## 26. unnorm_key 名称不匹配
+
+**现象**：
+```
+KeyError: 'Key \'actions\' not found in response data: keys=[], full response=
+{\'status\': \'error\', \'error\': {\'message\': \'"unnorm_key=\\\'franka\\\' not in [\\\'libero_franka\\\']"\'}}'
+```
+
+**根因**：`--args.unnorm-key franka` 传入的 key 是 `franka`，但服务器端只有 `libero_franka`（与 `dataset_statistics.json` 中的 top-level key 一致）。`PolicyNormProcessor` 用 `unnorm_key` 在 `dataset_statistics.json` 中查找对应的统计数据，key 不匹配则报错。
+
+**修复**：使用 `--args.unnorm-key libero_franka`。
+
+**涉及文件**：eval 命令行参数
+
+---
+
+## 27. FlowerVLA bf16 推理 dtype 不兼容
+
+**现象**：
+```
+KeyError: "Key 'actions' not found in response data: keys=[], full response=
+{'status': 'error', 'error': {'message': 'expected scalar type Float but found BFloat16'}}"
+```
+
+**根因**：`policy_wrapper.py` 中 `--use_bf16` flag 将整个 `framework` 模型 cast 到 `torch.bfloat16`（`framework = framework.to(torch.bfloat16)`）。但 FlowerVLA 的 Florence-2 VLM 或 DiT action head 中存在需要 float32 输入的操作（如特定 attention 层或 `torch.zeros` 未指定 dtype），导致前向传播时 dtype mismatch。
+
+FlowerVLA 的 `predict_action` 中虽有多处 `default_dtype = next(self.parameters()).dtype` 自适应 dtype，但 Florence-2 VLM 内部有些操作（如 `Florence2SdpaAttention` 或 embedding 层）可能不支持 bf16。
+
+**修复**：不使用 `--use_bf16` flag，以 float32 运行推理。Florence-2-large 约 0.78B + DiT head，float32 单卡显存足够（约 3-4 GB）。
+
+**涉及文件**：
+- `deployment/model_server/policy_wrapper.py`（第 51 行 `.to(torch.bfloat16)` 转换点）
+- `starVLA/model/framework/VLM4A/Flower/FlowerVLA.py`（predict_action 前向传播）

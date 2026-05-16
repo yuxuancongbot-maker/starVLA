@@ -10,6 +10,17 @@ from PIL import Image
 
 DEFAULT_IMAGE_SIZE = (200, 200)
 
+# CLIP normalization stats used by FLOWER training (OpenCLIP variant)
+FLOWER_IMAGE_MEAN = [0.48145466, 0.4578275, 0.40821073]
+FLOWER_IMAGE_STD = [0.26862954, 0.26130258, 0.27577711]
+
+
+def _normalize_tensor(t: torch.Tensor) -> torch.Tensor:
+    """Apply CLIP normalization (scale [0,1] and normalize with ImageNet stats)."""
+    mean = torch.tensor(FLOWER_IMAGE_MEAN, device=t.device, dtype=t.dtype).view(3, 1, 1)
+    std = torch.tensor(FLOWER_IMAGE_STD, device=t.device, dtype=t.dtype).view(3, 1, 1)
+    return (t - mean) / std
+
 
 def _pil_list_to_image_tensor(images: List[Image.Image], device: torch.device, dtype: torch.dtype) -> torch.Tensor:
     """Convert a list of PIL images to a batched tensor (B, T, C, H, W) with T=1."""
@@ -32,6 +43,7 @@ def _pil_list_to_image_tensor(images: List[Image.Image], device: torch.device, d
                 t = t / 255.0
         else:
             raise TypeError(f"Unsupported image type: {type(img)}")
+        t = _normalize_tensor(t)
         # Add time dimension: (C, H, W) → (1, C, H, W)
         t = t.unsqueeze(0)
         batch_tensors.append(t)

@@ -103,10 +103,8 @@ class CalvinPolicyClient:
         unnorm_key: str = "",
     ):
         self.client = ModelClient(
-            policy_ckpt_path=pretrained_path,
             host=host,
             port=port,
-            image_size=[resize_size, resize_size],
             unnorm_key=(unnorm_key or None),
         )
         self.resize_size = resize_size
@@ -135,11 +133,10 @@ class CalvinPolicyClient:
         rgb_static = obs["rgb_obs"]["rgb_static"]  # (200, 200, 3) uint8
         rgb_gripper = obs["rgb_obs"]["rgb_gripper"]  # (84, 84, 3) uint8
 
-        # Resize and pad images
-        image = image_tools.convert_to_uint8(image_tools.resize_with_pad(rgb_static, self.resize_size, self.resize_size))
-        wrist_image = image_tools.convert_to_uint8(
-            image_tools.resize_with_pad(rgb_gripper, self.resize_size, self.resize_size)
-        )
+        # Resize images with bilinear interpolation (matches FLOWER training: Resize(224))
+        from PIL import Image
+        image = np.array(Image.fromarray(rgb_static).resize((self.resize_size, self.resize_size), Image.BILINEAR))
+        wrist_image = np.array(Image.fromarray(rgb_gripper).resize((self.resize_size, self.resize_size), Image.BILINEAR))
 
         # Prepare input for policy server (aligned with eval_libero)
         example = {
@@ -174,6 +171,9 @@ def make_env(dataset_path: str):
         # Create a new camera dict without tactile
         new_cameras = OmegaConf.create({k: v for k, v in cfg.env.cameras.items() if k != "tactile"})
         cfg.env.cameras = new_cameras
+
+    # Disable EGL to use CPU rendering (headless servers without GPU-accelerated display)
+    cfg.env.use_egl = False
 
     # Initialize environment with modified config
     import hydra
