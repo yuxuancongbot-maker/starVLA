@@ -368,6 +368,16 @@ DATASET_NAMED_MIXTURES = {
         ("calvin_task_ABC_D", 1.0, "libero_franka"),
     ],
 
+    # Pretraining mix: Bridge + LIBERO for general manipulation
+    # Fractal excluded — state-only dataset, no video data
+    "calvin_pretrain": [
+        ("bridge_orig_lerobot", 1.0, "oxe_bridge"),
+        ("libero_10_no_noops_1.0.0_lerobot", 1.0, "libero_franka"),
+        ("libero_goal_no_noops_1.0.0_lerobot", 1.0, "libero_franka"),
+        ("libero_object_no_noops_1.0.0_lerobot", 1.0, "libero_franka"),
+        ("libero_spatial_no_noops_1.0.0_lerobot", 1.0, "libero_franka"),
+    ],
+
     "vla_arena_L0_S": [
         ("VLA_Arena_L0_S_lerobot_openpi", 1.0, "vla_arena_franka"),
     ],
