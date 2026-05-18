@@ -17,6 +17,11 @@ from starVLA.dataloader.gr00t_lerobot.registry import (
 )
 
 def collate_fn(batch):
+    # Truncate actions to the minimum length in the batch when mixing
+    # datasets with different action horizons (e.g., Bridge=16, LIBERO=8).
+    min_len = min(ex["action"].shape[0] for ex in batch)
+    for ex in batch:
+        ex["action"] = ex["action"][-min_len:]
     return batch
 
 def make_LeRobotSingleDataset(
