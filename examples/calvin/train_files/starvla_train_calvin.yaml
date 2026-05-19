@@ -1,13 +1,13 @@
 run_id: starvla
 run_root_dir: results/Checkpoints
 seed: 42
-wandb_entity: yuxuancong-bot
+wandb_entity: yuxuancong-bot-dalian-university-of-technology
 wandb_project: llavavla
 is_debug: false
 version_id: "0.21"
 
 framework:
-  name: QwenPI
+  name: Qwen3.5-2B
   qwenvl:
     base_vlm: ./playground/Pretrained_models/Qwen3.5-2B
     attn_implementation: flash_attention_2

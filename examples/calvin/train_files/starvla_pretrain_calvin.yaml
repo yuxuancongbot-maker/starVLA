@@ -2,7 +2,7 @@
 run_id: starvla
 run_root_dir: results/Checkpoints
 seed: 42
-wandb_entity: yuxuancong-bot
+wandb_entity: yuxuancong-bot-dalian-university-of-technology
 wandb_project: llavavla
 is_debug: false
 version_id: "0.21"
