@@ -57,15 +57,24 @@ class PolicyServerWrapper:
         self._model_cfg = model_cfg
 
         # action_chunk_size = future_action_window_size + 1 (matches old client).
-        action_model_cfg = model_cfg["framework"]["action_model"]
-        
-        if "action_horizon" in action_model_cfg:
-            self._action_chunk_size = int(action_model_cfg["action_horizon"])
-        elif "future_action_window_size" in action_model_cfg:
-            self._action_chunk_size = int(action_model_cfg["future_action_window_size"]) + 1
+        fw = model_cfg.get("framework", {})
+        if "action_model" in fw:
+            action_model_cfg = fw["action_model"]
+            if "action_horizon" in action_model_cfg:
+                self._action_chunk_size = int(action_model_cfg["action_horizon"])
+            elif "future_action_window_size" in action_model_cfg:
+                self._action_chunk_size = int(action_model_cfg["future_action_window_size"]) + 1
+            else:
+                raise ValueError(
+                    f"PolicyServerWrapper: no action_horizon or future_action_window_size in action_model for {self._ckpt_path}"
+                )
+        elif "flower" in fw:
+            # FlowerVLA config: action chunk size is multistep / act_window_size
+            flower_cfg = fw["flower"]
+            self._action_chunk_size = int(flower_cfg.get("multistep", flower_cfg.get("act_window_size", 10)))
         else:
             raise ValueError(
-                f"PolicyServerWrapper: no action_horizon or future_action_window_size found in model config for {self._ckpt_path}"
+                f"PolicyServerWrapper: no action_model or flower config found for {self._ckpt_path}"
             )
         # Cache of PolicyNormProcessor instances per unnorm_key.
         # For single-dataset ckpts unnorm_key is auto-selected; for multi-dataset

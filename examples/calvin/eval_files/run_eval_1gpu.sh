@@ -4,13 +4,13 @@ set -euo pipefail
 source $HOME/miniforge3/etc/profile.d/conda.sh
 
 # ===== 配置 =====
-CKPT="/inspire/qb-ilm2/project/26summer-camp-10/26220218/congyuxuan/starVLA/results/Checkpoints/qwengr00t_qwen3vl_4b_calvin_abcd_freezevlmfrommax/checkpoints/steps_2000_pytorch_model.pt"
+CKPT="/inspire/qb-ilm2/project/26summer-camp-10/26220218/congyuxuan/starVLA/results/Checkpoints/qwengr00t_qwen3vl_4b_calvin_abcd_max/checkpoints/steps_15000_pytorch_model.pt"
 CALVIN_DATA="/inspire/qb-ilm2/project/26summer-camp-10/26220218/congyuxuan/calvin/dataset/task_D_D"
 CALVIN_CONF="/inspire/qb-ilm2/project/26summer-camp-10/26220218/congyuxuan/calvin/calvin_models/conf"
 STARVLA_HOME="/inspire/qb-ilm2/project/26summer-camp-10/26220218/congyuxuan/starVLA"
 RESULTS_BASE="/inspire/qb-ilm2/project/26summer-camp-10/26220218/congyuxuan/eval_results"
-BASE_PORT=3794
-NUM_GPU=8
+BASE_PORT=5794
+NUM_GPU=1
 # ================
 
 cd "$STARVLA_HOME"

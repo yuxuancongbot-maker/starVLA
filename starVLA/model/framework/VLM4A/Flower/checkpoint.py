@@ -54,9 +54,45 @@ class FlowerVLACheckpointMixin:
 
     # ── State dict loading ───────────────────────────────────────────
 
+    # Keys that are safe to skip because they are deterministically
+    # initialised (buffers) or tied to another weight in the checkpoint.
+    _FLOWER_SAFE_MISSING_KEYS = {
+        # buffer computed from fixed sinusoidal formula; identical every init
+        "vlm.visual_temporal_embed.pos_idx_to_embed",
+        # zero-initialised buffer registered by Florence2ForConditionalGeneration
+        "vlm.language_model.final_logits_bias",
+        # tied to vlm.language_model.model.shared.weight which IS in the ckpt
+        "vlm.language_model.model.encoder.embed_tokens.weight",
+    }
+
     def load_state_dict(self, state_dict, strict=True, assign=False):
         """Overridden to remap FLOWER checkpoint keys before loading."""
         remapped = self._remap_state_dict_keys(state_dict)
+
+        # Patch tied embedding so that strict=True passes when the ckpt
+        # stores ``shared.weight`` but the model also expects ``embed_tokens.weight``.
+        shared_key = "vlm.language_model.model.shared.weight"
+        embed_key = "vlm.language_model.model.encoder.embed_tokens.weight"
+        if shared_key in remapped and embed_key not in remapped:
+            remapped[embed_key] = remapped[shared_key]
+
+        if strict:
+            model_keys = set(super().state_dict().keys())
+            ckpt_keys = set(remapped.keys())
+            missing = model_keys - ckpt_keys
+            safe_missing = missing & self._FLOWER_SAFE_MISSING_KEYS
+            if safe_missing:
+                # Fill safe-missing keys from the model's own current values
+                # (they are deterministic buffers / tied weights).
+                own_state = super().state_dict()
+                for k in safe_missing:
+                    remapped[k] = own_state[k]
+                logger.info(
+                    "Patched %d safe-missing key(s) into state dict: %s",
+                    len(safe_missing),
+                    sorted(safe_missing),
+                )
+
         return super().load_state_dict(remapped, strict=strict, assign=assign)
 
     # ── Weight loading with EMA handling ─────────────────────────────
